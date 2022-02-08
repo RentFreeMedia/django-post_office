@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.core.mail.message import SafeMIMEText
 from django.db import models
 from django.forms import BaseInlineFormSet
+from django.forms import Textarea
 from django.forms.widgets import TextInput
 from django.http.response import (HttpResponse, HttpResponseNotFound,
                                   HttpResponseRedirect)
@@ -15,6 +16,7 @@ from django.urls import re_path, reverse
 from django.utils.html import format_html
 from django.utils.text import Truncator
 from django.utils.translation import gettext_lazy as _
+from django_summernote.widgets import SummernoteWidget
 
 from .fields import CommaSeparatedEmailField
 from .mail import send
@@ -251,6 +253,10 @@ class EmailTemplateAdminForm(forms.ModelForm):
         model = EmailTemplate
         fields = ['name', 'description', 'subject', 'content', 'html_content', 'language',
                   'default_template']
+        widgets = {
+            'content': Textarea(attrs={'cols': 82, 'rows': 20}),
+            'html_content': SummernoteWidget(),
+        }
 
     def __init__(self, *args, **kwargs):
         instance = kwargs.get('instance')
@@ -275,7 +281,7 @@ class EmailTemplateInline(admin.StackedInline):
 
 class EmailTemplateAdmin(admin.ModelAdmin):
     form = EmailTemplateAdminForm
-    list_display = ('name', 'description_shortened', 'subject', 'languages_compact', 'created')
+    list_display = ('name', 'description_shortened', 'subject', 'languages_compact')
     search_fields = ('name', 'description', 'subject')
     fieldsets = [
         (None, {
@@ -319,4 +325,7 @@ class AttachmentAdmin(admin.ModelAdmin):
 admin.site.register(Email, EmailAdmin)
 admin.site.register(Log, LogAdmin)
 admin.site.register(EmailTemplate, EmailTemplateAdmin)
-admin.site.register(Attachment, AttachmentAdmin)
+
+EmailTemplate._meta.get_field('html_content').default = '<br /><br /><p style="text-align:center;font-size:small;">Click <a href="https://{{ unsubscribe }}">here</a> to unsubscribe from future emails.</p>'
+EmailTemplate._meta.get_field('content').default = '\n\nClick the following link to unsubscribe from future emails: \nhttps://{{ unsubscribe }}'
+Email._meta.get_field('from_email').default = settings.SERVER_EMAIL
