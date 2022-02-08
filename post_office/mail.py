@@ -1,5 +1,11 @@
 import sys
-
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
+from django.forms.models import model_to_dict
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
+from django.utils.timezone import now
+from users.tokens import unsubscribe_token
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import connection as db_connection
@@ -25,6 +31,7 @@ from .utils import (
 
 logger = setup_loghandlers("INFO")
 
+User = get_user_model()
 
 def create(sender, recipients=None, cc=None, bcc=None, subject='', message='',
            html_message='', context=None, scheduled_time=None, expires_at=None, headers=None,
@@ -169,11 +176,14 @@ def send_many(kwargs_list):
     Similar to mail.send(), but this function accepts a list of kwargs.
     Internally, it uses Django's bulk_create command for efficiency reasons.
     Currently send_many() can't be used to send emails with priority = 'now'.
+
+    Local changes: don't send right away, because the group email functionality
+    is elsewhere. Just queue the emails, thanks.
     """
-    emails = [send(commit=False, **kwargs) for kwargs in kwargs_list]
-    if emails:
-        Email.objects.bulk_create(emails)
-        email_queued.send(sender=Email, emails=emails)
+    emails = []
+    for kwargs in kwargs_list:
+        emails.append(send(commit=False, **kwargs))
+    Email.objects.bulk_create(emails)
 
 
 def get_queued():
@@ -314,11 +324,12 @@ def _send_bulk(emails, uses_multiprocessing=True, log_level=None):
 
         logs = []
         for (email, exception) in failed_emails:
-            logs.append(
-                Log(email=email, status=STATUS.failed,
-                    message=str(exception),
-                    exception_type=type(exception).__name__)
-            )
+            if len(email.to) > 0:
+                logs.append(
+                 Log(email=email, status=STATUS.failed,
+                     message=str(exception).replace('(', '').replace(')', '').replace(', b', ': '),
+                     exception_type=type(exception).__name__)
+                )
 
         if logs:
             Log.objects.bulk_create(logs)
@@ -349,7 +360,38 @@ def send_queued_mail_until_done(lockfile=default_lockfile, processes=1, log_leve
             logger.info('Acquired lock for sending queued emails at %s.lock', lockfile)
             while True:
                 try:
-                    send_queued(processes, log_level)
+                    group_emails = Email.objects.filter(status=STATUS.queued, group_id__isnull=False) \
+                        .select_related('template') \
+                        .filter(Q(scheduled_time__lte=now()) | Q(scheduled_time=None))
+
+                    if group_emails:
+                        kwargs_list = []
+                        for email in group_emails:
+                            group_emails_users = User.objects.filter(Q(groups__id=email.group_id, is_mailsubscribed=True))
+
+                            for user in group_emails_users:
+                                token = unsubscribe_token.make_token(user)
+                                uid = urlsafe_base64_encode(force_bytes(user.email))
+                                unsub_link = settings.BASE_URL + '/unsubscribe/' + uid + '/' + token + '/'
+                                user_context = model_to_dict(user, exclude=['groups', 'password', 'user_permissions'])
+                                unsub_context = { 'unsubscribe': unsub_link }
+                                context = {**user_context, **unsub_context}
+                                user.id = {
+                                    'sender': settings.DEFAULT_FROM_EMAIL,
+                                    'recipients': user.email,
+                                    'template': email.template,
+                                    'render_on_delivery': True,
+                                    'context': context,
+                                }
+
+                                kwargs_list.append(user.id)
+
+                        send_many(kwargs_list)
+
+                        send_queued(processes, log_level)
+                    else:
+                        send_queued(processes, log_level)
+
                 except Exception as e:
                     logger.exception(e, extra={'status_code': 500})
                     raise
