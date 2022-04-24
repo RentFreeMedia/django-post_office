@@ -115,7 +115,7 @@ def send(recipients=None, sender=None, template=None, context=None, subject='',
     try:
         cc = parse_emails(cc)
     except ValidationError as e:
-        raise ValidationError('c: %s' % e.message)
+        raise ValidationError('cc: %s' % e.message)
 
     try:
         bcc = parse_emails(bcc)
